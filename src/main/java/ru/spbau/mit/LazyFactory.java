@@ -1,6 +1,8 @@
 package ru.spbau.mit;
 
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.function.Supplier;
 
 /**
@@ -27,17 +29,18 @@ public class LazyFactory {
     }
 
     private static class MultiThreadLazy<T> implements Lazy<T> {
+        private static Object NONE = new Object();
         private Supplier<T> supplier;
-        T result;
+        private volatile T result = (T) NONE;
 
         MultiThreadLazy(Supplier<T> supplier) {
             this.supplier = supplier;
         }
 
         public T get() {
-            if (this.supplier != null) {
+            if (result == NONE) {
                 synchronized (this) {
-                    if (this.supplier != null) {
+                    if (result == NONE) {
                         result = supplier.get();
                         supplier = null;
                     }
@@ -48,33 +51,23 @@ public class LazyFactory {
     }
 
     private static class NonBlockingMultiThreadLazy<T> implements Lazy<T> {
-        private static Supplier PROCESSING_RESULT = ()->null;
-
-        private AtomicReference<Supplier<T>> supplierReference;
-        T result;
+        private static Object NONE = new Object();
+        private static final AtomicReferenceFieldUpdater<NonBlockingMultiThreadLazy, Object> UPDATER =
+                AtomicReferenceFieldUpdater.newUpdater(NonBlockingMultiThreadLazy.class, Object.class, "result");
+        private volatile Object result = NONE;
+        private Supplier<T> supplier;
 
         NonBlockingMultiThreadLazy(Supplier<T> supplier) {
-            this.supplierReference = new AtomicReference<>(supplier);
+            this.supplier = supplier;
         }
 
         public T get() {
-            Supplier<T> supplier = supplierReference.get();
-            if (supplier == null) {
-                return result;
+            if (result == NONE) {
+                T newResult = supplier.get();
+                UPDATER.compareAndSet(this, NONE, newResult);
+                supplier = null;
             }
-            T newResult = supplier.get();
-            supplier = supplierReference.getAndUpdate((v) -> v == null ? null : PROCESSING_RESULT);
-            if (supplier == null) { //value is already evaluated
-                return result;
-            } else if (supplier != PROCESSING_RESULT) { //value was not evaluated in any thread
-                result = newResult;
-            } else while (supplier == PROCESSING_RESULT) {
-                //some other thread have already evaluated value but not assigned it
-                supplier = supplierReference.get();
-            }
-
-            supplierReference.set(null);
-            return result;
+            return (T) result;
         }
     }
 

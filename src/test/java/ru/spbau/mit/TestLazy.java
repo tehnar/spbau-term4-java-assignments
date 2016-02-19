@@ -15,7 +15,7 @@ import java.util.function.Supplier;
 public class TestLazy {
 
     private static class TestSupplier implements Supplier<Integer> {
-        final private Random random = new Random(123);
+        private final Random random = new Random(123);
 
         @Override
         public Integer get() {
@@ -29,7 +29,7 @@ public class TestLazy {
     }
 
     private static class SideEffectSupplier implements Supplier<Integer> {
-        public List<Integer> sideEffects = new ArrayList<>();
+        public List<Integer> sideEffects = Collections.synchronizedList(new ArrayList<>());
         @Override
         public Integer get() {
             int result = new TestSupplier().get();
@@ -39,46 +39,29 @@ public class TestLazy {
     }
 
     private static class NullSupplier implements Supplier<Object> {
-
+        private Object value = null;
         @Override
-        public Object get() {
-            return null;
+        public synchronized Object get() {
+            if (value == null) {
+                value = new Object();
+                return null;
+            }
+            return value;
         }
     }
 
     @Rule
     public ExpectedException lazyNullSupplierException = ExpectedException.none();
 
-    @Test
-    public void TestOneThreadedLazy() {
-        Lazy<Integer> lazy = LazyFactory.createLazy(new TestSupplier());
-        assertEquals(lazy.get(), lazy.get());
-    }
-
-    @Test
-    public void TestLazyNullSupplier() {
-        lazyNullSupplierException.expect(IllegalArgumentException.class);
-        Lazy<Integer> lazy = LazyFactory.createLazy(null);
-
-        lazyNullSupplierException.expect(IllegalArgumentException.class);
-        lazy = LazyFactory.createMultiThreadLazy(null);
-
-        lazyNullSupplierException.expect(IllegalArgumentException.class);
-        lazy = LazyFactory.createNonBlockingMultiThreadLazy(null);
-    }
-
-    @Test
-    public void TestNonBlockingMultiThreadedLazy() {
-        final List<Integer> results = Collections.synchronizedList(new ArrayList<>());
-        Lazy<Integer> lazy = LazyFactory.createNonBlockingMultiThreadLazy(new TestSupplier());
-        
+    private List runLazyManyThreads(Lazy lazy) {
         List<Thread> threads = new ArrayList<>();
+        final List results = Collections.synchronizedList(new ArrayList<>());
 
         for (int i = 0; i < 100; i++) {
             threads.add(new Thread(() -> results.add(lazy.get())));
         }
 
-        threads.forEach(java.lang.Thread::start);
+        threads.forEach(Thread::start);
         for (Thread thread : threads) {
             try {
                 thread.join();
@@ -86,7 +69,36 @@ public class TestLazy {
                 e.printStackTrace();
             }
         }
+        return results;
+    }
 
+    @Test
+    public void TestOneThreadedLazy() {
+        SideEffectSupplier supplier = new SideEffectSupplier();
+        Lazy<Integer> lazy = LazyFactory.createLazy(supplier);
+        for (int i = 0; i < 100; i++) {
+            assertEquals(lazy.get(), lazy.get());
+        }
+        assertEquals(supplier.sideEffects.size(), 1);
+    }
+
+    @Test
+    public void TestLazyNullSupplier() {
+        lazyNullSupplierException.expect(IllegalArgumentException.class);
+        LazyFactory.createLazy(null);
+
+        lazyNullSupplierException.expect(IllegalArgumentException.class);
+        LazyFactory.createMultiThreadLazy(null);
+
+        lazyNullSupplierException.expect(IllegalArgumentException.class);
+        LazyFactory.createNonBlockingMultiThreadLazy(null);
+    }
+
+    @Test
+    public void TestNonBlockingMultiThreadedLazy() {
+        Lazy<Integer> lazy = LazyFactory.createNonBlockingMultiThreadLazy(new TestSupplier());
+
+        List results = runLazyManyThreads(lazy);
         assertEquals(results.stream().distinct().count(), 1);
     }
 
@@ -95,34 +107,35 @@ public class TestLazy {
         SideEffectSupplier supplier = new SideEffectSupplier();
         Lazy<Integer> lazy = LazyFactory.createMultiThreadLazy(supplier);
 
-        List<Thread> threads = new ArrayList<>();
-
-        for (int i = 0; i < 100; i++) {
-            threads.add(new Thread(lazy::get));
-        }
-
-        threads.forEach(java.lang.Thread::start);
-        for (Thread thread : threads) {
-            try {
-                thread.join();
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-        }
+        List result = runLazyManyThreads(lazy);
+        assertEquals(result.stream().distinct().count(), 1);
         assertEquals(supplier.sideEffects.size(), 1);
     }
 
     @Test
     public void TestNullLazySupplier() {
+        final boolean[] failed = {false};
         final Lazy<Object> oneThreadLazy = LazyFactory.createLazy(new NullSupplier());
         assertEquals(oneThreadLazy.get(), null);
 
         final Lazy<Object> multiThreadLazy = LazyFactory.createMultiThreadLazy(new NullSupplier());
-        for (int i = 0; i < 10; i++)
-            new Thread(()->assertEquals(multiThreadLazy.get(), null)).start();
+        for (int i = 0; i < 10; i++) {
+            new Thread(() -> {
+                if (multiThreadLazy.get() != null) {
+                    failed[0] = true;
+                }
+            }).start();
+        }
+        assertEquals(false, failed[0]);
 
         final Lazy<Object> atomicMultiThreadLazy = LazyFactory.createMultiThreadLazy(new NullSupplier());
-        for (int i = 0; i < 10; i++)
-            new Thread(()->assertEquals(atomicMultiThreadLazy.get(), null)).start();
+        for (int i = 0; i < 10; i++) {
+            new Thread(()-> {
+                if (atomicMultiThreadLazy.get() != null) {
+                    failed[0] = true;
+                }
+            }).start();
+        }
+        assertEquals(false, failed[0]);
     }
 }
